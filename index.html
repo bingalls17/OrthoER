@@ -432,37 +432,27 @@ body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; b
        FIREBASE — replace the config below with YOUR project values
        after following the setup guide (SETUP.md)
        ═══════════════════════════════════════════════════════ -->
-  <script type="module">
-    import { initializeApp }   from 'https://www.gstatic.com/firebasejs/10.12.0/firebase-app.js';
-    import { getFirestore, doc, getDoc, setDoc, onSnapshot }
-                               from 'https://www.gstatic.com/firebasejs/10.12.0/firebase-firestore.js';
-
-    // ─── PASTE YOUR CONFIG HERE ──────────────────────────────────────────────
-// For Firebase JS SDK v7.20.0 and later, measurementId is optional
-const firebaseConfig = {
-  apiKey: "AIzaSyDOiL8zvb-G7a3iXc17gRYYMPTajobvugw",
-  authDomain: "orthoer-7033f.firebaseapp.com",
-  projectId: "orthoer-7033f",
-  storageBucket: "orthoer-7033f.firebasestorage.app",
-  messagingSenderId: "1022684488431",
-  appId: "1:1022684488431:web:6655388d38b764f733311a",
-  measurementId: "G-EZYRM006SX"
-};
-    // ─────────────────────────────────────────────────────────────────────────
-
-    const fbApp = initializeApp(firebaseConfig);
-    const db    = getFirestore(fbApp);
-    const DOC   = doc(db, 'ortho', 'shared');   // single shared document
-
-    // ── expose to main script ────────────────────────────────────────────────
-    window._fb = { db, DOC, doc, getDoc, setDoc, onSnapshot };
-
-    // ── pull once on load, then push to main initialiser ────────────────────
-    window._fbReady = getDoc(DOC).then(snap => {
-      window._fbSnap = snap.exists() ? snap.data() : {};
-    }).catch(() => {
-      window._fbSnap = {};          // offline / first load — fall back silently
-    });
+  <!-- Firebase SDKs (compat build — loads synchronously, fixes timing bug) -->
+  <script src="https://www.gstatic.com/firebasejs/10.12.0/firebase-app-compat.js"></script>
+  <script src="https://www.gstatic.com/firebasejs/10.12.0/firebase-firestore-compat.js"></script>
+  <script>
+    const firebaseConfig = {
+      apiKey:            "AIzaSyDOiL8zvb-G7a3iXc17gRYYMPTajobvugw",
+      authDomain:        "orthoer-7033f.firebaseapp.com",
+      projectId:         "orthoer-7033f",
+      storageBucket:     "orthoer-7033f.firebasestorage.app",
+      messagingSenderId: "1022684488431",
+      appId:             "1:1022684488431:web:6655388d38b764f733311a"
+    };
+    try {
+      firebase.initializeApp(firebaseConfig);
+      window._db  = firebase.firestore();
+      window._DOC = window._db.collection('ortho').doc('shared');
+      window._fbOK = true;
+    } catch(e) {
+      console.warn('Firebase init failed — running in local-only mode', e);
+      window._fbOK = false;
+    }
   </script>
 </head>
 
@@ -1865,64 +1855,87 @@ let pendingImages = [];
 // ============================================================
 
 // ════════════════════════════════════════════════════════════════
-// PERSISTENCE  — Firebase Firestore (shared across all devices)
-//                with localStorage as offline fallback
+// ════════════════════════════════════════════════════════════════
+// PERSISTENCE  — Firebase Firestore (shared) + localStorage (fallback)
 // ════════════════════════════════════════════════════════════════
 
-// ── local fallbacks (used while Firebase loads or when offline) ──
 function lsave(key, val) { try { localStorage.setItem('ortho_' + key, JSON.stringify(val)); } catch(e){} }
 function lload(key, def) { try { const v = localStorage.getItem('ortho_' + key); return v ? JSON.parse(v) : def; } catch(e){ return def; } }
 
-// ── init state from Firebase snapshot (populated before app init) ─
-function fromFB(key, def) {
-  const snap = window._fbSnap || {};
-  return (snap[key] !== undefined) ? snap[key] : lload(key, def);
-}
-
-let teamPrefs      = { red:{}, blue:{}, green:{} };
+// App state — populated by initAppState() before any rendering
+let teamPrefs       = { red:{}, blue:{}, green:{} };
 let injuryTeamPrefs = {};
 let unicorns        = {};
+let customInjuries  = {};
+let contentOverrides= {};
 
-// populated after seedDocData runs (needs contentOverrides / customInjuries)
-// — assigned below after seed section
+// Called once at startup — loads from Firebase if available, else localStorage
+async function initAppState() {
+  if (window._fbOK) {
+    try {
+      const snap = await window._DOC.get();
+      if (snap.exists) {
+        const d = snap.data();
+        teamPrefs        = d.teamPrefs        || { red:{}, blue:{}, green:{} };
+        injuryTeamPrefs  = d.injuryTeamPrefs  || {};
+        unicorns         = d.unicorns         || {};
+        customInjuries   = d.customInjuries   || {};
+        contentOverrides = d.contentOverrides || {};
+        // mirror to localStorage for offline resilience
+        lsave('teamPrefs',        teamPrefs);
+        lsave('injuryTeamPrefs',  injuryTeamPrefs);
+        lsave('unicorns',         unicorns);
+        lsave('customInjuries',   customInjuries);
+        lsave('contentOverrides', contentOverrides);
+        return;
+      }
+    } catch(e) {
+      console.warn('Firebase read failed — falling back to localStorage', e);
+    }
+  }
+  // Fallback: localStorage
+  teamPrefs        = lload('teamPrefs',        { red:{}, blue:{}, green:{} });
+  injuryTeamPrefs  = lload('injuryTeamPrefs',  {});
+  unicorns         = lload('unicorns',         {});
+  customInjuries   = lload('customInjuries',   {});
+  contentOverrides = lload('contentOverrides', {});
+}
 
-// ── write to both Firestore and localStorage ─────────────────────
-async function saveAll() {
-  const payload = {
-    teamPrefs,
-    injuryTeamPrefs,
-    unicorns,
-    customInjuries,
-    contentOverrides,
-    seed_version: localStorage.getItem('ortho_seed_version') || ''
-  };
-  // local write (instant)
+// Save to both Firebase and localStorage on every change
+function saveAll() {
   lsave('teamPrefs',        teamPrefs);
   lsave('injuryTeamPrefs',  injuryTeamPrefs);
   lsave('unicorns',         unicorns);
   lsave('customInjuries',   customInjuries);
   lsave('contentOverrides', contentOverrides);
-  // remote write (async — don't await so UI stays snappy)
-  if (window._fb) {
-    window._fb.setDoc(window._fb.DOC, payload, { merge: true }).catch(() => {});
+  if (window._fbOK) {
+    window._DOC.set({
+      teamPrefs,
+      injuryTeamPrefs,
+      unicorns,
+      customInjuries,
+      contentOverrides
+    }).catch(e => console.warn('Firebase write failed', e));
   }
 }
 
-// ── live listener — update local state when another device saves ─
+// Live listener — pushes changes from other devices into this session
 function startFirebaseListener() {
-  if (!window._fb) return;
-  window._fb.onSnapshot(window._fb.DOC, snap => {
-    if (!snap.exists()) return;
+  if (!window._fbOK) return;
+  window._DOC.onSnapshot(snap => {
+    if (!snap.exists) return;
     const d = snap.data();
-    // merge into local state
-    if (d.teamPrefs)       { teamPrefs       = d.teamPrefs;       lsave('teamPrefs', teamPrefs); }
-    if (d.injuryTeamPrefs) { injuryTeamPrefs = d.injuryTeamPrefs; lsave('injuryTeamPrefs', injuryTeamPrefs); }
-    if (d.unicorns)        { unicorns        = d.unicorns;        lsave('unicorns', unicorns); }
-    if (d.customInjuries)  { customInjuries  = d.customInjuries;  lsave('customInjuries', customInjuries); }
-    if (d.contentOverrides){ contentOverrides= d.contentOverrides; lsave('contentOverrides', contentOverrides); }
-    // re-render visible panel if open
-    if (typeof renderDetailPanel === 'function' && currentRegionKey) renderDetailPanel();
-  });
+    let changed = false;
+    if (d.teamPrefs        && JSON.stringify(d.teamPrefs)        !== JSON.stringify(teamPrefs))        { teamPrefs        = d.teamPrefs;        lsave('teamPrefs',        teamPrefs);        changed = true; }
+    if (d.injuryTeamPrefs  && JSON.stringify(d.injuryTeamPrefs)  !== JSON.stringify(injuryTeamPrefs))  { injuryTeamPrefs  = d.injuryTeamPrefs;  lsave('injuryTeamPrefs',  injuryTeamPrefs);  changed = true; }
+    if (d.unicorns         && JSON.stringify(d.unicorns)         !== JSON.stringify(unicorns))         { unicorns         = d.unicorns;         lsave('unicorns',         unicorns);         changed = true; }
+    if (d.customInjuries   && JSON.stringify(d.customInjuries)   !== JSON.stringify(customInjuries))   { customInjuries   = d.customInjuries;   lsave('customInjuries',   customInjuries);   changed = true; }
+    if (d.contentOverrides && JSON.stringify(d.contentOverrides) !== JSON.stringify(contentOverrides)) { contentOverrides = d.contentOverrides; lsave('contentOverrides', contentOverrides); changed = true; }
+    if (changed && currentRegionKey) {
+      const detailActive = document.getElementById('screen-detail') && document.getElementById('screen-detail').classList.contains('active');
+      if (detailActive) { const inj = getInjury(currentRegionKey, currentInjuryIndex); if (inj) renderDetailTab(inj, currentDetailTab); }
+    }
+  }, e => console.warn('Firebase listener error', e));
 }
 
 // ============================================================
@@ -1981,19 +1994,7 @@ function startFirebaseListener() {
 
 })();
 
-// ── init app state (Firebase-first, localStorage fallback) ────────────────
-let customInjuries  = fromFB('customInjuries',  {});
-let contentOverrides= fromFB('contentOverrides', {});
-teamPrefs           = fromFB('teamPrefs',        { red:{}, blue:{}, green:{} });
-injuryTeamPrefs     = fromFB('injuryTeamPrefs',  {});
-unicorns            = fromFB('unicorns',         {});
-
-// start live listener so updates from other devices propagate in real-time
-if (window._fbReady) {
-  window._fbReady.then(() => startFirebaseListener());
-} else {
-  startFirebaseListener();
-}
+// State vars already declared above — initAppState() will populate them at boot.
 
 // ============================================================
 
@@ -5979,7 +5980,11 @@ document.getElementById('global-team-body') && renderGlobalTeamPrefs();
 
 })();
 
-saveAll();
+// ── BOOT — wait for Firebase, then start the app ──────────────────────────
+(async function bootApp() {
+  await initAppState();     // load from Firebase (or localStorage if offline)
+  startFirebaseListener();  // real-time sync from other devices going forward
+})();
 
 </script>
 
