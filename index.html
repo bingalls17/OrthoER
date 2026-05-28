@@ -1944,7 +1944,7 @@ function startFirebaseListener() {
 
 // ============================================================
 
-(function seedDocData() {
+function seedDocData() {
 
   // Only seed if not already seeded (check version flag)
 
@@ -1962,7 +1962,7 @@ function startFirebaseListener() {
 
   try { existing = JSON.parse(localStorage.getItem('ortho_contentOverrides') || '{}'); } catch(e) {}
 
-  const merged = Object.assign({}, docOverrides, existing);
+  const merged = Object.assign({}, existing, docOverrides);  // user edits win — docOverrides only fills gaps
 
   localStorage.setItem('ortho_contentOverrides', JSON.stringify(merged));
 
@@ -1992,7 +1992,7 @@ function startFirebaseListener() {
 
   console.log('Ortho ER: seeded document data successfully');
 
-})();
+}
 
 // State vars already declared above — initAppState() will populate them at boot.
 
@@ -5983,6 +5983,7 @@ document.getElementById('global-team-body') && renderGlobalTeamPrefs();
 // ── BOOT — wait for Firebase, then start the app ──────────────────────────
 (async function bootApp() {
   await initAppState();     // load from Firebase (or localStorage if offline)
+  seedDocData();            // seed built-in defaults — now runs AFTER Firebase data is loaded
   startFirebaseListener();  // real-time sync from other devices going forward
 })();
 
